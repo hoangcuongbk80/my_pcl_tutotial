@@ -16,13 +16,13 @@ Download the source tree into your catkin workspace (here we assume ~/catkin_ws)
 
 `$ git clone https://github.com/hoangcuongbk80/my_pcl_tutotial.git
 
-#### Compile the source
+## Compile the source
 
 `$ cd ~/catkin_ws`
 
 `$ catkin_make --pkg my_pcl_tutorial
 
-Then run:
+## Then run:
 
 $ roslaunch openni2_launch openni2.launch
 
