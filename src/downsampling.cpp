@@ -7,8 +7,10 @@
 #include <pcl/point_types.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/conversions.h>
+ #include <pcl/visualization/pcl_visualizer.h>
 
 ros::Publisher pub;
+pcl::PointCloud<pcl::PointXYZ>::Ptr point_cloudPtr (new pcl::PointCloud<pcl::PointXYZ>);
 
 void 
 cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
@@ -26,6 +28,10 @@ cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
   sor.setInputCloud (cloudPtr);
   sor.setLeafSize (0.03, 0.03, 0.03);
   sor.filter (cloud_filtered);
+
+  pcl::PointCloud<pcl::PointXYZ> point_cloud;
+  pcl::fromPCLPointCloud2( cloud_filtered, point_cloud);
+  pcl::copyPointCloud(point_cloud, *point_cloudPtr);
 
   // Convert to ROS data type
   sensor_msgs::PointCloud2 output;
@@ -50,4 +56,16 @@ main (int argc, char** argv)
 
   // Spin
   ros::spin ();
+
+  boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer (new pcl::visualization::PCLVisualizer ("3D Viewer"));
+  viewer->setBackgroundColor (0, 0, 0);
+  pcl::visualization::PointCloudColorHandlerCustom<pcl::PointXYZ> single_color(point_cloudPtr, 0, 255, 0);
+  viewer->addPointCloud<pcl::PointXYZ> (point_cloudPtr, single_color, "sample cloud");
+  viewer->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 3, "sample cloud");
+  viewer->addCoordinateSystem (1.0);
+  viewer->initCameraParameters ();
+  while (!viewer->wasStopped ())
+    {
+        viewer->spinOnce (100);
+    }
 }

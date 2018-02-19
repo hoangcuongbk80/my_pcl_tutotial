@@ -139,6 +139,7 @@ cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
   std::cerr<< "origin:     " << (int)point_cloudPtr->size() << "\n";
   // Convert to ROS data type
   point_cloud_segmented->header.frame_id = point_cloudPtr->header.frame_id;
+  //point_cloud_segmented->header.frame_id = "camera_depth_optical_frame";
   if(point_cloud_segmented->size()) pcl::toPCLPointCloud2(*point_cloud_segmented, cloud_filtered);
   else pcl::toPCLPointCloud2(*point_cloudPtr, cloud_filtered);
   sensor_msgs::PointCloud2 output;

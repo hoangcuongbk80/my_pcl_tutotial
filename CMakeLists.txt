@@ -12,7 +12,19 @@ find_package(catkin REQUIRED COMPONENTS
   pcl_ros
   roscpp
   sensor_msgs
+  cv_bridge
 )
+
+find_package(OpenCV 3 REQUIRED
+	COMPONENTS
+	opencv_core
+	opencv_imgproc
+	opencv_imgcodecs
+	opencv_highgui
+	CONFIG
+)
+
+find_package(OpenCL REQUIRED)
 
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
@@ -106,7 +118,7 @@ find_package(catkin REQUIRED COMPONENTS
 catkin_package(
 #  INCLUDE_DIRS include
 #  LIBRARIES my_pcl_tutorial
-#  CATKIN_DEPENDS pcl_conversions pcl_ros roscpp sensor_msgs
+   CATKIN_DEPENDS pcl_conversions pcl_ros roscpp sensor_msgs cv_bridge
 #  DEPENDS system_lib
 )
 
@@ -117,14 +129,17 @@ catkin_package(
 ## Specify additional locations of header files
 ## Your package locations should be listed before other locations
 include_directories(
-# include
+  include
   ${catkin_INCLUDE_DIRS}
+  ${OPENCL_INCLUDE_DIR}
 )
 
 add_executable(segmentation src/segmentation.cpp)
 add_executable(downsampling src/downsampling.cpp)
+add_executable(segmentation_OpenCL src/segmentation_OpenCL.cpp)
 target_link_libraries(segmentation ${catkin_LIBRARIES})
 target_link_libraries(downsampling ${catkin_LIBRARIES})
+target_link_libraries(segmentation_OpenCL ${catkin_LIBRARIES} ${OpenCL_LIBRARY} ${OpenCV_LIBS})
 
 ## Declare a C++ library
 # add_library(${PROJECT_NAME}
