@@ -1,22 +1,18 @@
-#define MAT_SIZE 100
-#define MAT_NUMEL 10000
-#define TOTAL_NUMEL 2560000
-#define NUM_MATR 256
-#define NUM_LOOP 200
 
-__kernel void GPU_First_Task(__global unsigned char* offset, __global unsigned char* X, 
-                             __global unsigned char* Z, __global unsigned char* W)
-    {
-       int index = get_global_id(0);
-       int depth = index / (MAT_NUMEL);
-       int X_index = index % MAT_NUMEL;
-       W[index] = Z[index] + X[X_index] * offset[depth]; 
-    }
+#define cl_rows 480
+#define cl_cols 640
 
-__kernel void GPU_Second_Task(__global unsigned char* offset, __global unsigned char* Y, 
-                             __global unsigned char* Z, __global unsigned char* W)
+__kernel void GPU_NormalCompute(__global float* depth, __global float3* normals)
     {
-       int index = get_global_id(0);
-       int depth = index / (MAT_NUMEL);
-       W[index] = Z[index] + offset[depth]; 
+       int row = get_global_id(0); int col = get_global_id(1);
+       int index = cl_cols*row + col;
+       if(depth[index] == 0 || row == 0 || row == cl_rows-1 || col == 0 || col == cl_cols-1) 
+           {
+              normals[index].xyz = (float3)(0.0f, 0.0f, 0.0f);
+           }
+        else
+        {
+              normals[index].x = (depth[index + cl_cols] - depth[index - cl_cols]) / 2.0; //depth(row+1, col)-depth(row-1, col)
+              normals[index].y = (depth[index + 1] - depth[index - 1]) / 2.0; //depth(row, col+1)-depth)row, col-1)
+        }
     }

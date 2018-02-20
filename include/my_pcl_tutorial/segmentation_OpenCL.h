@@ -3,13 +3,9 @@
 #include <stdio.h>
 #include <iostream>
 #include <assert.h>
-
-#ifdef __APPLE__		
-#include <OpenCL/opencl.h>		
-#else		
+	
 #include <CL/cl.h>	
-#endif		
-
+		
 #define MAT_SIZE 100
 #define MAT_NUMEL 10000
 #define TOTAL_NUMEL 2560000

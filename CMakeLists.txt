@@ -134,11 +134,13 @@ include_directories(
   ${OPENCL_INCLUDE_DIR}
 )
 
-add_executable(segmentation src/segmentation.cpp)
 add_executable(downsampling src/downsampling.cpp)
+add_executable(segmentation_PCL src/segmentation_PCL.cpp)
+add_executable(segmentation_Native src/segmentation_Native.cpp)
 add_executable(segmentation_OpenCL src/segmentation_OpenCL.cpp)
-target_link_libraries(segmentation ${catkin_LIBRARIES})
 target_link_libraries(downsampling ${catkin_LIBRARIES})
+target_link_libraries(segmentation_PCL ${catkin_LIBRARIES})
+target_link_libraries(segmentation_Native ${catkin_LIBRARIES} ${OpenCL_LIBRARY} ${OpenCV_LIBS})
 target_link_libraries(segmentation_OpenCL ${catkin_LIBRARIES} ${OpenCL_LIBRARY} ${OpenCV_LIBS})
 
 ## Declare a C++ library

@@ -2,7 +2,6 @@
 
 //branch
 #include <ros/ros.h>
-#include <my_pcl_tutorial/segmentation_OpenCL.h>
 
 // OpenCV specific includes
 #include <sensor_msgs/Image.h>
@@ -23,131 +22,12 @@ using namespace cv;
 #define fy 520.0
 #define cx 319.5
 #define cy 239.5
-#define cl_rows 480
-#define cl_cols 640
-#define cl_imgSize cl_rows*cl_cols
-
-cl_device_id    		        deviceID;
-cl_context                  context = NULL;
-cl_command_queue            command_queue = NULL;
-cl_program                  program = NULL;
-cl_kernel                   kernel = NULL;
-cl_int                      ret;
-cl_mem                      gpu_depth, gpu_normals;
-float                       *cpu_depth;
-cl_float3                   *cpu_normals;
 
 ros::Publisher pub;
 pcl::PointCloud<pcl::PointXYZ>::Ptr point_cloudPtr (new pcl::PointCloud<pcl::PointXYZ>);
 cv::Mat normals_image, depth_image, segmented_image, img;
 pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud_;
 int cluster_Index; int neighBor = 10; int timePrint = 6; bool noData;
-
-void GPUMemAlloc(cl_context context, cl_mem* cl_depth, cl_mem* cl_normals)
-{
-    cl_int         ret;
-    cl_mem         depth, normals;
-
-    depth = clCreateBuffer(context, CL_MEM_READ_WRITE, cl_imgSize * sizeof(float), NULL, &ret);
-    CheckCLError (ret, "Could not create clCreateBuffer d_X.", "Created clCreateBuffer d_X.");
-
-    normals = clCreateBuffer(context, CL_MEM_READ_WRITE, cl_imgSize * sizeof(cl_float3), NULL, &ret);
-    CheckCLError (ret, "Could not create clCreateBuffer d_X.", "Created clCreateBuffer d_X.");
-
-    cpu_depth = (float*)malloc(cl_imgSize * sizeof(float));
-    cpu_normals = (cl_float3*)malloc(cl_imgSize * sizeof(cl_float3));
-
-    *cl_depth = depth; *cl_normals = normals;
-}
-
-void copyDepthToCPU()
-{
-   int loop = 0;
-   noData = true;
-   for(int row=0; row < depth_image.rows; row++)
-    {
-       for(int col=0; col < depth_image.cols; col++)       
-        {
-          if(isnan(depth_image.at<float>(row, col)))
-          {
-            cpu_depth[loop] = 0; loop++; continue;
-          }
-          cpu_depth[loop] = depth_image.at<float>(row, col); loop++;
-          noData = false;        
-        }
-    }
-}
-
-void copyDepthToGPU(cl_command_queue command_queue, cl_mem* gpu_depth)
-{
-    cl_int  ret;
-    ret = clEnqueueWriteBuffer(command_queue, *gpu_depth, CL_TRUE, 0, cl_imgSize * sizeof(float), cpu_depth, 0, NULL, NULL);
-    CheckCLError (ret, "Could not create clEnqueueWriteBuffer.", "Created clEnqueueWriteBuffer.");	
-}
-
-void OpenCL_start()
-{
-   InitializeOpenCL(&deviceID, &context, &command_queue, &program);
-   GPUMemAlloc(context, &gpu_depth, &gpu_normals);
-}
-
-void copyNormalsFromGPU(cl_command_queue command_queue, cl_mem gpu_normals)
-{
-  cv::Mat normals(depth_image.size(), CV_32FC3);
-  normals_image = normals.clone();
-   cl_int  ret;
-   ret = clEnqueueReadBuffer(command_queue, gpu_normals, CL_TRUE, 0, cl_imgSize * sizeof(cl_float3), cpu_normals, 0, NULL, NULL);
-   CheckCLError (ret, "Could not create clEnqueueReadBuffer.", "Created clEnqueueReadBuffer.");
-   for(int i = 0; i < cl_imgSize; i++)
-   {
-     int row = i / cl_cols; int col = i % cl_cols;
-     if(cpu_normals[i].x == 0 & cpu_normals[i].y == 0 & cpu_normals[i].z == 0) 
-     {
-       Vec3f d(0, 0, 0); normals_image.at<Vec3f>(row, col) = d; continue;
-     }
-     float dzdx = cpu_normals[i].x;
-     float dzdy = cpu_normals[i].y;
-     Vec3f d(-dzdx, -dzdy, 0.001f);
-     Vec3f n; normalize(d, n, 1.0, 0.0, NORM_L2);
-     normals_image.at<Vec3f>(row, col) = n;
-   }
-}
-
-void OpenCL_process()
-{
-  clock_t start, end;
-  double time_used;
-
-  copyDepthToCPU();
-  if(noData) return;
-
-  start = clock();
-  copyDepthToGPU(command_queue, &gpu_depth);
-  end = clock();
-  time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
-  if(timePrint) std::cerr << "Time to execute copyDepthToGPU: " << time_used << "\n";
-  
-  // Create OpenCL Kernel
-  kernel = clCreateKernel(program, "GPU_NormalCompute", &ret);
-  CheckCLError (ret, "Could not create clCreateKernel.", "Created clCreateKernel.");
-  // Set OpenCL Kernel Parameters
-  ret = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&gpu_depth);
-  ret = clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&gpu_normals);
-  
-  // Execute OpenCL Kernel
-  start = clock();
-  size_t * global = (size_t*) malloc(sizeof(size_t)*2); global[0] = cl_rows; global[1] = cl_cols;
-  ret = clEnqueueNDRangeKernel(command_queue, kernel, 2, NULL, global, NULL, 0, NULL, NULL);
-  end = clock();
-  time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
-  if(timePrint) std::cerr << "Time to execute kernel : " << time_used << "\n";
-
-  start = clock();
-  copyNormalsFromGPU(command_queue, gpu_normals);
-  end = clock();
-  time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
-  if(timePrint) std::cerr << "Time to execute copyNormalsFromGPU: " << time_used << "\n";
-}
 
 void depthToClould()
 {
@@ -290,6 +170,39 @@ void smoothing()
   GaussianBlur( depth_image, depth_image, Size( 5, 5), 0, 0 );
 }
 
+void normalsCompute()
+{
+    //smoothing();
+    if(depth_image.type() != CV_32FC1) depth_image.convertTo(depth_image, CV_32FC1);
+    cv::Mat normals(depth_image.size(), CV_32FC3);
+    normals_image = normals.clone();
+    noData = true;
+    for(int x = 0; x < depth_image.rows; x++)
+     {
+       for(int y = 0; y < depth_image.cols; y++)
+        {
+           if(isnan(depth_image.at<float>(x, y)) || x == 0 || x == depth_image.rows-1 || y == 0 || y == depth_image.cols-1) 
+           {
+              Vec3f n(0.0, 0.0, 0.0); normals_image.at<Vec3f>(x, y) = n;
+              continue;
+           }
+           if(isnan(depth_image.at<float>(x-1, y)) || isnan(depth_image.at<float>(x+1, y)) ||
+              isnan(depth_image.at<float>(x, y-1)) || isnan(depth_image.at<float>(x, y+1))) 
+           {
+              Vec3f n(1.0, 1.0, 1.0); normals_image.at<Vec3f>(x, y) = n;
+              continue;
+           }
+
+           float dzdx = (depth_image.at<float>(x+1, y) - depth_image.at<float>(x-1, y)) / 2.0;
+           float dzdy = (depth_image.at<float>(x, y+1) - depth_image.at<float>(x, y-1)) / 2.0;
+           Vec3f d(-dzdx, -dzdy, 0.001f);
+           Vec3f n; normalize(d, n, 1.0, 0.0, NORM_L2);
+           normals_image.at<Vec3f>(x, y) = n;
+           noData = false;
+        }
+     }
+}
+
 void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
 {
   depthToClould();
@@ -321,28 +234,27 @@ void normal_cb (const sensor_msgs::Image::ConstPtr& msg)
   double time_used;
 
   start = clock();
-  OpenCL_process();
+  normalsCompute();
   end = clock();
   if(noData) { std::cerr << "No Data!\n"; return; }
   time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
-  if(timePrint) std::cerr << "Total time for data transfering and kernel execution: " << time_used << "\n";
+  if(timePrint) std::cerr << "Time to execute normalsCompute: " << time_used << "\n";
 
   start = clock();
   Clustering();
   end = clock();
   time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
-  if(timePrint) std::cerr << "Time to execute Recursive function on CPU: " << time_used << "\n\n";
-  
+  if(timePrint) std::cerr << "Time to execute Recursive function: " << time_used << "\n\n";
+
   cv::imshow("depth", depth_image);
   cv::waitKey(3);
-  cv::imshow("Normals", normals_image);
+  cv::imshow("normals", normals_image);
   cv::waitKey(3);
   if(timePrint > 0) timePrint--;
 }
 
 int main (int argc, char** argv)
 {
-  OpenCL_start();
   // Initialize ROS
   ros::init (argc, argv, "my_pcl_tutorial");
   ros::NodeHandle nh;
@@ -357,17 +269,4 @@ int main (int argc, char** argv)
 
   // Spin
   ros::spin ();
-
-      // Finalization 
-    ret = clFlush(command_queue);
-    ret = clFinish(command_queue);
-    ret = clReleaseKernel(kernel);
-    ret = clReleaseProgram(program);
-    ret = clReleaseMemObject(gpu_depth);
-    ret = clReleaseMemObject(gpu_normals);
-    ret = clReleaseCommandQueue(command_queue);
-    ret = clReleaseContext(context);
-
-    // Free host memory
-    free(cpu_depth);
 }
