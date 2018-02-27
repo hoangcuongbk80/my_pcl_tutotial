@@ -26,6 +26,12 @@ using namespace cv;
 #define cl_rows 480
 #define cl_cols 640
 #define cl_imgSize cl_rows*cl_cols
+#define gausize 7
+#define neighBor 3
+#define normalThresh 1
+#define distThresh 0.02
+#define depthRE 0.001
+
 
 cl_device_id    		        deviceID;
 cl_context                  context = NULL;
@@ -33,31 +39,91 @@ cl_command_queue            command_queue = NULL;
 cl_program                  program = NULL;
 cl_kernel                   kernel = NULL;
 cl_int                      ret;
-cl_mem                      gpu_depth, gpu_normals;
+cl_event                    kernelDone;
+cl_mem                      gpu_depth, gpu_pdepth, gpu_normals, gpu_pnormals, gpu_gauKernel;
 float                       *cpu_depth;
 cl_float3                   *cpu_normals;
+float                       *gauKernel;
 
 ros::Publisher pub;
 pcl::PointCloud<pcl::PointXYZ>::Ptr point_cloudPtr (new pcl::PointCloud<pcl::PointXYZ>);
-cv::Mat normals_image, depth_image, segmented_image, img;
-pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud_;
-int cluster_Index; int neighBor = 10; int timePrint = 6; bool noData;
+cv::Mat normals_image(cl_rows, cl_cols, CV_32FC1, Scalar(0));
+cv::Mat depth_image(cl_rows, cl_cols, CV_32FC1, Scalar(0));
+cv::Mat img(cl_rows, cl_cols, CV_32FC1, Scalar(0));
+cv::Mat segmented_image(cl_rows, cl_cols, CV_32FC1, Scalar(0));
+pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud_ (new pcl::PointCloud<pcl::PointXYZRGB>);
+int cluster_Index; int timePrint = 6; bool noData; int recurNum;
 
-void GPUMemAlloc(cl_context context, cl_mem* cl_depth, cl_mem* cl_normals)
+void getGaussian(int kernelHeight, int kernelWidth, double sigma)
+{
+    gauKernel = (float*)malloc(kernelWidth * kernelHeight * sizeof(float));
+    float sum = 0.0000;
+
+    for (int row = 0; row < kernelHeight ; row++) 
+    {
+        for (int col = 0 ; col < kernelWidth ; col++)
+        {
+            gauKernel[row * kernelWidth + col] = 1;
+            //gauKernel[row * kernelWidth + col] = exp(-((row - kernelHeight / 2) * (row - kernelHeight /2) +
+           // (col - kernelWidth / 2) * (col - kernelWidth / 2)) / (2*sigma*sigma)) / (2*M_PI*sigma*sigma);
+            sum += gauKernel[row * kernelWidth + col];
+        }
+    }
+
+    for (int row = 0; row < kernelHeight ; row++) 
+    {
+        for (int col = 0 ; col < kernelWidth ; col++)
+        {
+            gauKernel[row * kernelWidth + col] = gauKernel[row * kernelWidth + col] / sum;
+        }
+    }
+}
+
+void copygaussianToGPU(cl_context context, cl_command_queue command_queue)
+{
+    cl_int ret;
+    gpu_gauKernel = clCreateBuffer(context, CL_MEM_READ_WRITE, gausize * gausize * sizeof(float), NULL, &ret);
+    CheckCLError (ret, "Could not create clCreateBuffer gpu_gassianKernel.", "Created clCreateBuffer gpu_gassianKernel.");
+
+    getGaussian(gausize, gausize, 1);
+
+    ret = clEnqueueWriteBuffer(command_queue, gpu_gauKernel, CL_TRUE, 0, gausize * gausize * sizeof(float), gauKernel, 0, NULL, NULL);
+    CheckCLError (ret, "Could not create clEnqueueWriteBuffer.", "Created clEnqueueWriteBuffer.");
+    
+    float total = 0;
+    for (int row = 0 ; row < gausize ; row++) 
+    {
+      for (int col = 0 ; col < gausize ; col++) 
+        {
+            //std::cerr << gauKernel[row * gausize + col] << "  ";
+            //if(col == gausize - 1) std::cerr << "\n";
+            //total += gauKernel[row * gausize + col];
+        }
+    }
+    //std::cerr << "total: " << total << "\n";
+}
+
+void GPUMemAlloc(cl_context context, cl_mem* cl_depth, cl_mem* cl_pdepth, cl_mem* cl_normals, cl_mem* cl_pnormals)
 {
     cl_int         ret;
-    cl_mem         depth, normals;
+    cl_mem         depth, postdepth, normals, pnormals;
 
     depth = clCreateBuffer(context, CL_MEM_READ_WRITE, cl_imgSize * sizeof(float), NULL, &ret);
-    CheckCLError (ret, "Could not create clCreateBuffer d_X.", "Created clCreateBuffer d_X.");
+    CheckCLError (ret, "Could not create clCreateBuffer depth.", "Created clCreateBuffer depth.");
+
+    postdepth = clCreateBuffer(context, CL_MEM_READ_WRITE, cl_imgSize * sizeof(float), NULL, &ret);
+    CheckCLError (ret, "Could not create clCreateBuffer postdepth.", "Created clCreateBuffer postdepth.");
 
     normals = clCreateBuffer(context, CL_MEM_READ_WRITE, cl_imgSize * sizeof(cl_float3), NULL, &ret);
-    CheckCLError (ret, "Could not create clCreateBuffer d_X.", "Created clCreateBuffer d_X.");
+    CheckCLError (ret, "Could not create clCreateBuffer normals.", "Created clCreateBuffer normals.");
+
+    pnormals = clCreateBuffer(context, CL_MEM_READ_WRITE, cl_imgSize * sizeof(cl_float3), NULL, &ret);
+    CheckCLError (ret, "Could not create clCreateBuffer normals.", "Created clCreateBuffer normals.");
 
     cpu_depth = (float*)malloc(cl_imgSize * sizeof(float));
     cpu_normals = (cl_float3*)malloc(cl_imgSize * sizeof(cl_float3));
 
-    *cl_depth = depth; *cl_normals = normals;
+    *cl_depth = depth; *cl_pdepth = postdepth; *cl_normals = normals; *cl_pnormals = pnormals;
 }
 
 void copyDepthToCPU()
@@ -81,33 +147,40 @@ void copyDepthToCPU()
 void copyDepthToGPU(cl_command_queue command_queue, cl_mem* gpu_depth)
 {
     cl_int  ret;
-    ret = clEnqueueWriteBuffer(command_queue, *gpu_depth, CL_TRUE, 0, cl_imgSize * sizeof(float), cpu_depth, 0, NULL, NULL);
+    ret = clEnqueueWriteBuffer(command_queue, *gpu_depth, CL_TRUE, 0, cl_imgSize * sizeof(float), cpu_depth, 0, NULL, &kernelDone);
+    ret = clWaitForEvents(1, &kernelDone);
     CheckCLError (ret, "Could not create clEnqueueWriteBuffer.", "Created clEnqueueWriteBuffer.");	
 }
 
 void OpenCL_start()
 {
    InitializeOpenCL(&deviceID, &context, &command_queue, &program);
-   GPUMemAlloc(context, &gpu_depth, &gpu_normals);
+   GPUMemAlloc(context, &gpu_depth, &gpu_pdepth, &gpu_normals, &gpu_pnormals);
+   copygaussianToGPU(context, command_queue);
 }
 
 void copyNormalsFromGPU(cl_command_queue command_queue, cl_mem gpu_normals)
 {
-  cv::Mat normals(depth_image.size(), CV_32FC3);
-  normals_image = normals.clone();
+   cv::Mat normals(depth_image.size(), CV_32FC3);
+   normals_image = normals.clone();
    cl_int  ret;
-   ret = clEnqueueReadBuffer(command_queue, gpu_normals, CL_TRUE, 0, cl_imgSize * sizeof(cl_float3), cpu_normals, 0, NULL, NULL);
+   ret = clEnqueueReadBuffer(command_queue, gpu_normals, CL_TRUE, 0, cl_imgSize * sizeof(cl_float3), cpu_normals, 0, NULL, &kernelDone);
+   ret = clWaitForEvents(1, &kernelDone);
    CheckCLError (ret, "Could not create clEnqueueReadBuffer.", "Created clEnqueueReadBuffer.");
+}
+
+void normalizeNormals()
+{
    for(int i = 0; i < cl_imgSize; i++)
    {
      int row = i / cl_cols; int col = i % cl_cols;
      if(cpu_normals[i].x == 0 & cpu_normals[i].y == 0 & cpu_normals[i].z == 0) 
      {
-       Vec3f d(0, 0, 0); normals_image.at<Vec3f>(row, col) = d; continue;
+       Vec3f d(0.0f, 0.0f, 0.0f); normals_image.at<Vec3f>(row, col) = d; continue;
      }
      float dzdx = cpu_normals[i].x;
      float dzdy = cpu_normals[i].y;
-     Vec3f d(-dzdx, -dzdy, 0.001f);
+     Vec3f d(-dzdx, -dzdy, depthRE);
      Vec3f n; normalize(d, n, 1.0, 0.0, NORM_L2);
      normals_image.at<Vec3f>(row, col) = n;
    }
@@ -127,20 +200,42 @@ void OpenCL_process()
   time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
   if(timePrint) std::cerr << "Time to execute copyDepthToGPU: " << time_used << "\n";
   
+  //---------------------------0----------------------------
+  // Pre-Processing
+  kernel = clCreateKernel(program, "Pre_Processing", &ret);
+  CheckCLError (ret, "Could not create clCreateKernel.", "Created clCreateKernel.");
+  // Set OpenCL Kernel Parameters
+  ret = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&gpu_gauKernel);
+  ret = clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&gpu_depth); 
+  ret = clSetKernelArg(kernel, 2, sizeof(cl_mem), (void *)&gpu_pdepth);
+
+  // Execute OpenCL Kernel
+  start = clock();
+  size_t * global = (size_t*) malloc(sizeof(size_t)*2); global[0] = cl_rows; global[1] = cl_cols;
+  ret = clEnqueueNDRangeKernel(command_queue, kernel, 2, NULL, global, NULL, 0, NULL, &kernelDone);
+  ret = clWaitForEvents(1, &kernelDone);
+  end = clock();
+  time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
+  if(timePrint) std::cerr << "Time to execute Pre_Processing kernel : " << time_used << "\n";
+
+  //---------------------------0----------------------------
+  // Compute Normals
   // Create OpenCL Kernel
   kernel = clCreateKernel(program, "GPU_NormalCompute", &ret);
   CheckCLError (ret, "Could not create clCreateKernel.", "Created clCreateKernel.");
   // Set OpenCL Kernel Parameters
-  ret = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&gpu_depth);
+  ret = clSetKernelArg(kernel, 0, sizeof(cl_mem), (void *)&gpu_pdepth);
   ret = clSetKernelArg(kernel, 1, sizeof(cl_mem), (void *)&gpu_normals);
   
   // Execute OpenCL Kernel
   start = clock();
-  size_t * global = (size_t*) malloc(sizeof(size_t)*2); global[0] = cl_rows; global[1] = cl_cols;
-  ret = clEnqueueNDRangeKernel(command_queue, kernel, 2, NULL, global, NULL, 0, NULL, NULL);
+  //size_t * global = (size_t*) malloc(sizeof(size_t)*2); global[0] = cl_rows; global[1] = cl_cols;
+  ret = clEnqueueNDRangeKernel(command_queue, kernel, 2, NULL, global, NULL, 0, NULL, &kernelDone);
+  ret = clWaitForEvents(1, &kernelDone);
   end = clock();
   time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
-  if(timePrint) std::cerr << "Time to execute kernel : " << time_used << "\n";
+  if(timePrint) std::cerr << "Time to execute GPU_NormalCompute kernel : " << time_used << "\n";
+  //---------------------------0----------------------------
 
   start = clock();
   copyNormalsFromGPU(command_queue, gpu_normals);
@@ -149,28 +244,22 @@ void OpenCL_process()
   if(timePrint) std::cerr << "Time to execute copyNormalsFromGPU: " << time_used << "\n";
 }
 
-void depthToClould()
+int depthToClould()
 {
    cloud_.reset(new pcl::PointCloud<pcl::PointXYZRGB>);
    pcl::PointXYZRGB point;
-   for(int row=0; row < depth_image.rows; row++)
+   for(int row = 0; row < depth_image.rows; row++)
     {
-       for(int col=0; col < depth_image.cols; col++)       
+       for(int col = 0; col < depth_image.cols; col++)       
         {
           if(isnan(depth_image.at<float>(row, col))) continue;
           double depth = depth_image.at<float>(row, col);
-          //if(col%10 == 0 & row%10 == 0) std::cerr << "depth: " <<  depth << "\n";
           point.x = (col-cx) * depth / fx;
           point.y = (row-cy) * depth / fy;
           point.z = depth;
+          point.r = 255; point.b = 0; point.g =0;
 
-           if (segmented_image.at<float>(row, col) == -1) continue; 
-           else if (segmented_image.at<float>(row, col) == -1) //Red	#FF0000	(255,0,0)
-			     {
-				      point.r = 0;
-				      point.g = 0;
-				      point.b = 255;
-			     }
+          if (segmented_image.at<float>(row, col) == -1) continue; 
 			    else if (segmented_image.at<float>(row, col) == 1) //Lime	#00FF00	(0,255,0)
 			     {
 				      point.r = 255;
@@ -234,30 +323,37 @@ void depthToClould()
 					        point.b = 128;
 				       }
             }
+
          cloud_->push_back(point);
         }
     }
+    return 0;
 }
 
-void RecursiveSearch(int cluster_Index, int row, int col)
+void RecursiveSearch(int cluster_Index, float seedNormal, int row, int col)
 {
   segmented_image.at<float>(row, col) = cluster_Index;
+  recurNum++;
+  if(recurNum > 100000) { recurNum--; return;} //To avoid core dumped by increasing number of recursive function
 
-  for(int i=-neighBor; i < neighBor + 1; i++)
-   for(int j=-neighBor; j < neighBor + 1; j++)
+  for(int i = -neighBor; i < neighBor + 1; i++)
+   for(int j = -neighBor; j < neighBor + 1; j++)
     {
        if(row + i > 0 & col + j > 0 & row + i < normals_image.rows & col + j < normals_image.cols)
        {
-          if(isnan(depth_image.at<float>(row+i, col+j))) continue;
-          if(segmented_image.at<float>(row+i, col+j) == 0)
-          if(abs(depth_image.at<float>(row+i, col+j) - depth_image.at<float>(row, col)) < 0.01)
+          if(!isnan(depth_image.at<float>(row + i, col + j)))
+          if(segmented_image.at<float>(row + i, col + j) == 0)
+          if(abs(depth_image.at<float>(row + i, col + j) - depth_image.at<float>(row, col)) < distThresh)
           {
-             if(abs(normals_image.at<Vec3f>(row, col).val[0] + normals_image.at<Vec3f>(row, col).val[1] + normals_image.at<Vec3f>(row, col).val[2] - 
-             normals_image.at<Vec3f>(row+i, col+j).val[0] - normals_image.at<Vec3f>(row+i, col+j).val[1] - normals_image.at<Vec3f>(row+i, col+j).val[2]) < 3)
-               RecursiveSearch(cluster_Index, row+i, col+j);
+              if(abs(seedNormal - normals_image.at<Vec3f>(row + i, col + j).val[0] - 
+                normals_image.at<Vec3f>(row + i, col + j).val[1] - normals_image.at<Vec3f>(row + i, col + j).val[2]) < normalThresh)
+                {
+                   RecursiveSearch(cluster_Index, seedNormal, row + i, col + j);
+                }
           }
        }
     }
+  recurNum--;
 }
 
 void Clustering()
@@ -265,24 +361,31 @@ void Clustering()
   cluster_Index = 0;
   cv::Mat segmented(depth_image.size(), CV_32FC1, Scalar(0));
   segmented_image = segmented.clone();
-
+  int i = 0;
   for(int row = 0; row < depth_image.rows; row++)
    {
      for(int col = 0; col < depth_image.cols; col++)       
       {
+         i++;
          if(isnan(depth_image.at<float>(row, col)) || row - neighBor < 0 || row + neighBor > depth_image.rows-1 || col - neighBor < 0 || col + neighBor > depth_image.cols-1)
          {
            segmented_image.at<float>(row, col) = -1;
            continue;
          }
+         if(normals_image.at<Vec3f>(row, col).val[0] == 0.0f & normals_image.at<Vec3f>(row, col).val[1] == 0.0f & normals_image.at<Vec3f>(row, col).val[2] == 0.0f) 
+          {
+              segmented_image.at<float>(row, col) = -1; continue;
+          }
          if(segmented_image.at<float>(row, col) == 0)
          {
            cluster_Index++;
-           RecursiveSearch(cluster_Index, row, col);
+           float seedNormal = normals_image.at<Vec3f>(row, col).val[0] + normals_image.at<Vec3f>(row, col).val[1] + normals_image.at<Vec3f>(row, col).val[2];
+           recurNum = 0;
+           RecursiveSearch(cluster_Index, seedNormal, row, col);
          }  
       }
    }
-   //std::cerr << "cluster_Index: " << cluster_Index << "\n";
+   std::cerr << "cluster_Index: " << cluster_Index << "\n";
 }
 
 void smoothing()
@@ -293,6 +396,7 @@ void smoothing()
 void cloud_cb (const sensor_msgs::PointCloud2ConstPtr& cloud_msg)
 {
   depthToClould();
+  if(cloud_->size() == 0) return;
   sensor_msgs::PointCloud2 output;
   pcl::PCLPointCloud2 cloud_filtered;
   cloud_->header.frame_id = "camera_depth_optical_frame";
@@ -327,6 +431,7 @@ void normal_cb (const sensor_msgs::Image::ConstPtr& msg)
   time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
   if(timePrint) std::cerr << "Total time for data transfering and kernel execution: " << time_used << "\n";
 
+  normalizeNormals();
   start = clock();
   Clustering();
   end = clock();
@@ -338,6 +443,14 @@ void normal_cb (const sensor_msgs::Image::ConstPtr& msg)
   cv::imshow("Normals", normals_image);
   cv::waitKey(3);
   if(timePrint > 0) timePrint--;
+}
+
+bool test(int x)
+{
+   int y = 9;
+   int z = 3;
+   std::cerr << x << "\n";
+   test(x+1);
 }
 
 int main (int argc, char** argv)
@@ -358,16 +471,23 @@ int main (int argc, char** argv)
   // Spin
   ros::spin ();
 
+  //test(0);
+
       // Finalization 
     ret = clFlush(command_queue);
     ret = clFinish(command_queue);
     ret = clReleaseKernel(kernel);
     ret = clReleaseProgram(program);
     ret = clReleaseMemObject(gpu_depth);
+    ret = clReleaseMemObject(gpu_pdepth);
     ret = clReleaseMemObject(gpu_normals);
+    ret = clReleaseMemObject(gpu_pnormals);
+    ret = clReleaseMemObject(gpu_gauKernel);
     ret = clReleaseCommandQueue(command_queue);
     ret = clReleaseContext(context);
 
     // Free host memory
     free(cpu_depth);
+    free(cpu_normals);
+    free(gauKernel);
 }
