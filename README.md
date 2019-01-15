@@ -2,7 +2,7 @@
 
 [Watch video](https://www.youtube.com/watch?v=0gA_Dr9YYRY)
 
-This contains a breif guide how to install / run the code.
+This contains a brief guide how to install / run the code.
 
 ## Installation instructions
 The tools require full ROS installation. The installation assumes you have Ubuntu 16.04 LTS [ROS Kinetic] or Ubntu 14.04 LTS [ROS Indigo].
